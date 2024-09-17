@@ -926,7 +926,9 @@ correct_manually_annotate <- function (df_3, print_no=10,df_4,query_seq)
 				}
 			}
 		}
-		setTxtProgressBar(pb, j)
+		if(length(unique(input$qseqid))>1){
+			setTxtProgressBar(pb, j)
+		}
 		cat("\n")
 		j <- j + 1
 	}
