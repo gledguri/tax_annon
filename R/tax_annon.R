@@ -630,7 +630,7 @@ manually_annotate <- function(input,method=1,skip=T,print_blast=T,query_vector=N
 		ret_df[ret_df$qseqid==ii,2] <- unique(input$annotated_tax[input$qseqid==ii])  
 		ret_df[ret_df$qseqid==ii,3] <- unique(input$pmatchsel[input$qseqid==ii])  
 	}
-	write.csv(input,"manually_annotated_function_outcome.csv",row.names = F)
+	write.csv(input,"3_manually_annotated_function_outcome.csv",row.names = F)
 	return(ret_df)
 }#function
 
