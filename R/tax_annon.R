@@ -735,8 +735,9 @@ correct_manually_annotate <- function (df_3, print_no=10,df_4,query_seq)
 																										input$Ssciname[grep(";", input$Ssciname)])
 	j = 1
 	while (j <= length(unique(input$qseqid))) {
-		pb <- txtProgressBar(1, length(unique(input$qseqid)), 
-												 style = 3)
+		if(length(unique(input$qseqid))>1){
+			pb <- txtProgressBar(1, length(unique(input$qseqid)), style = 3)
+		}
 		i <- unique(input$qseqid)[j]
 		list_of_query <- input[input$qseqid == i, ]
 		
