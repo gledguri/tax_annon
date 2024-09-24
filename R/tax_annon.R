@@ -949,3 +949,406 @@ correct_manually_annotate <- function (df_3, print_no=10,df_4,query_seq)
 	return(list(df_3=df3,
 							df_4=df4))
 }
+
+
+#' Annotate blast results
+#'
+#' This function reads blasts results and automatically or manually annotates the blasted sequences
+#' to the best match resutl
+#' @param input the blast output dataframe from NCBI
+#' @param method The annotation method. 1=Fully manual; 2=Semi-automatic; 3=Fully Automatic
+#' @return prints a csv file in your working directory named "manually_annotated_function_outcome.csv"
+#' @return returns a dataframe containing query id, species names of query match and % match
+#' @export
+#' @examples
+#' manually_annotate(blast_output,method = 3)
+#' @name Packages asd
+manually_annotate_2 <- function(input,method=1,read_data,sequence_id,reads){ #Method 1: "Conservative; Methood 2: "Semiconservative"; Method 3: "Automatic"
+	
+	if (!require("devtools")) {install.packages("devtools",dependencies = TRUE);require("devtools")}
+	if (!require("ggu.base.fun")) {devtools::install_github("gledguri/ggednasd/ggu.base.fun")}
+	if (!require("dplyr")) {install.packages("dplyr",dependencies = TRUE);require("dplyr")}
+	if (!require("coda")) {install.packages("coda",dependencies = TRUE);require("coda")}
+	if (!require("vctrs")) {install.packages("vctrs",dependencies = TRUE);require("vctrs")}
+	if (!require("stringr")) {install.packages("stringr",dependencies = TRUE);require("stringr")}
+	
+	magic.pident <- function(input,pident){
+		input[pident>=99.5] <-             paste0("\033[0;", 32, "m", input[pident>=99.5],"\033[0m")
+		input[pident<99.5&pident>=98.5] <- paste0("\033[0;", 36, "m", input[pident<99.5&pident>=98.5],"\033[0m")
+		input[pident<98.5&pident>=97.5] <- paste0("\033[0;", 34, "m", input[pident<98.5&pident>=97.5],"\033[0m")
+		input[pident<97.5&pident>=96.5] <- paste0("\033[0;", 33, "m", input[pident<97.5&pident>=96.5],"\033[0m")
+		input[pident<96.5] <-             paste0("\033[0;", 31, "m", input[pident<96.5],"\033[0m")
+		return(input)}
+	
+	function_col <- function(x = character()) {
+		vec_assert(x, character())
+		new_vctr(x, class = "vctrs_function_col")}
+	
+	format.vctrs_function_col <- function(x,...) {
+		gsub("function",crayon::red("function"),vec_data(x))}
+	
+	pr_df <- function(vector_var,wide=40){
+		wide=wide
+		temp <- wide-nchar(vector_var)
+		for (i in 1:length(temp)) {
+			if (temp[i]>=0) {
+				temp[i] <- paste(rep(" ",temp[i]), collapse = "")
+			}else{
+				vector_var[i] <- substr(vector_var[i],0,wide)
+				temp[i] <- ""
+			}
+		}
+		return(paste0(vector_var,temp))
+	}
+	
+	allduplicates <- function(vector){
+		vector%in%unique(vector[duplicated(vector)])
+	}
+	
+	unlist_uneven_list <- function(list){
+		v <- vector("numeric")
+		for (i in 1:length(list)) {
+			v[i] <- length(list[[i]])
+		}
+		x <- as.data.frame(matrix(NA,length(list),max(v)))
+		for (i in 1:length(list)) {
+			x[i,1:length(list[[i]])] <- list[[i]]
+		}
+		return(x)
+	}
+	
+	is.defined <- function(sym) {
+		sym <- deparse(substitute(sym))
+		env <- parent.frame()
+		exists(sym, env)
+	}
+	
+	rowpaste <- function(inn){
+		vvv <- vector(length=length(nrow(inn)))
+		for (k in 1:nrow(inn)) {
+			vvv[k] <- paste(inn[k,],collapse = " ")
+		}
+		return(vvv)
+	}
+	
+	input <- tibble::tibble(input)
+	columns <- c("Ssciname","scommname","qseqid","sseqid","pident",
+							 "length","mismatch","gapopen","qcovus","qstart","qend",
+							 "sstart","send","evalue","staxids","qlen","qcovs")
+	if (!"annotated_tax"%in%colnames(input)) input$annotated_tax <- NA
+	if (!"pmatchsel"%in%colnames(input)) input$pmatchsel <- NA
+	cat("The data frame should contain these columns \n",columns)
+	cat("checking the names of the input column")
+	col_missing <- sum(!columns%in%colnames(input))
+	if(col_missing>0)cat(columns[!columns%in%colnames(input)]," column is missing")
+	input$Ssciname[grep(";",input$Ssciname)] <- gsub(";", " | ", input$Ssciname[grep(";",input$Ssciname)])
+	# if(!sum(is.na(query_vector))){input <- input[input$qseqid%in%query_vector,]}
+	
+	summarised_reads <- read_data %>%
+		rename(hash = !!rlang::sym(sequence_id)) %>%
+		group_by(hash) %>%
+		summarise(sum_Reads = sum(.data[[reads]]))
+	
+	input <- left_join(input,summarised_reads,by=c('qseqid'='hash'))
+	
+	input <- input %>% arrange(desc(sum_Reads))
+	
+	if (method==1) {
+		j=1 #build the loop
+		while (j <= length(unique(input$qseqid))){ #Loop of method 1
+			pb <- txtProgressBar(1,length(unique(input$qseqid)),style = 3) #progress bar
+			i <- unique(input$qseqid)[j] #select the unique query ID
+			list_of_query <- input[input$qseqid==i,] #Create a dataframe with all subjects the query blasted towards
+			
+			# if (sum(skip==T&!is.na(list_of_query$annotated_tax))>0) {setTxtProgressBar(pb,j);cat("\n");j <- j+1} #Skipping in method 1
+			# else { #Not skipping method 1
+			#Esthetics of the list
+			list_of_query_print <- tibble::tibble(list_of_query);
+			list_of_query_print$pident <- magic.pident(list_of_query$pident,list_of_query$pident);
+			list_of_query_print$mismatch <- magic.pident(list_of_query$mismatch,list_of_query$pident)
+			list_of_query_print$mismatch <- function_col(list_of_query_print$mismatch) 
+			list_of_query_print$pident <- function_col(list_of_query_print$pident)
+			
+			#Print
+			cat("\n");questions(paste0("The query \"",i, "\" blast resutls ::"));cat("\n")
+			print(list_of_query_print[,c(1:2,5,7:13)]);cat("\n")
+			
+			#Create a summary list
+			summary_of_list <- list_of_query%>% group_by(Ssciname) %>% summarize(pident_max=max(pident), pident=mean(pident)) #Summary of the dataframe
+			summary_of_list <- summary_of_list[order(summary_of_list$pident_max,decreasing = T),] #Order the summary based on the %match
+			
+			#Menu and choices
+			chsl <- c(paste0(summary_of_list$Ssciname),"Undefined","Enter manually") #Create taxa selection options
+			cat("\n");questions("Select the subject that your query belongs to ::");cat("\n")
+			sl <- multi.menu(c(paste(magic.pident(pr_df(summary_of_list$Ssciname,30),summary_of_list$pident_max),"::",
+															 magic.pident(pr_df(summary_of_list$pident_max,5),summary_of_list$pident_max), 
+															 magic.pident(pr_df(summary_of_list$pident,5),summary_of_list$pident)),
+												 "Unidentified","Enter manually"))
+			
+			if(sum(chsl[sl]=="Enter manually")>0){chsl[sl] <- readline("Enter the name of taxa ")}
+			#Writing on the fasta file
+			input$annotated_tax[input$qseqid==i] <- paste(chsl[sl],collapse=" | ") #Assigns the selected taxa to the input database
+			input$pmatchsel[input$qseqid==i] <- paste(round(summary_of_list$pident_max[summary_of_list$Ssciname%in%chsl[sl]]/100,3),collapse=" | ") #Assigns the selected taxa to the input database
+			
+			#Esthetics
+			setTxtProgressBar(pb,j);cat("\n") #progress bar
+			j <- j+1 #loop mechanism
+			# write.csv(input,"manually_annotated_function_outcome.csv",row.names = FALSE)
+			# } #Not skipping method 1
+		} #Loop of method 1
+	} #Method 1
+	
+	else if (method==2) { #Method 2
+		j=1 #build the loop
+		while (j <= length(unique(input$qseqid))){ #Loop of method 2
+			pb <- txtProgressBar(1,length(unique(input$qseqid)),style = 3) #progress bar
+			i <- unique(input$qseqid)[j] #select the unique query ID
+			list_of_query <- input[input$qseqid==i,] #Create a dataframe with all subjects the query blasted towards
+			
+			#Esthetics of the list
+			# if (sum(skip==T&!is.na(list_of_query$annotated_tax))>0) {setTxtProgressBar(pb,j);cat("\n");j <- j+1} #Skipping in method 2
+			# else { #Not skipping method 2
+			list_of_query_print <- tibble::tibble(list_of_query);
+			list_of_query_print$pident <- magic.pident(list_of_query$pident,list_of_query$pident);
+			list_of_query_print$mismatch <- magic.pident(list_of_query$mismatch,list_of_query$pident)
+			list_of_query_print$mismatch <- function_col(list_of_query_print$mismatch) 
+			list_of_query_print$pident <- function_col(list_of_query_print$pident)
+			
+			#Print
+			printbold(unique(list_of_query_print$sum_Reads),wide = 60,col = 47)
+			cat("\n");questions(paste0("The query \"",i, "\" blast resutls ::"));cat("\n")
+			print(list_of_query_print[,c(1:2,5,7:13)]);cat("\n")
+			
+			#Create a summary list
+			summary_of_list <- list_of_query%>% group_by(Ssciname) %>% summarize(pident_max=max(pident), pident=mean(pident)) #Summary of the dataframe
+			summary_of_list <- summary_of_list[order(summary_of_list$pident_max,decreasing = T),] #Order the summary based on the %match
+			
+			chsl <- c(paste0(summary_of_list$Ssciname),"Undefined","Enter manually") #Create taxa selection options
+			
+			match_id <- 100
+			l <- summary_of_list$pident_max==match_id
+			if (sum(l)==0) {
+				l <- summary_of_list$pident_max==max(summary_of_list$pident_max)
+				match_id <- max(summary_of_list$pident_max)
+			}
+			if (sum(l)==1) {#If only 1 subject is 100%
+				cat("\n");questions("A summary of subjects that your query has been blasted towards ::");cat("\n")
+				cat(c(paste(magic.pident(pr_df(summary_of_list$Ssciname,30),summary_of_list$pident_max),"::",
+										magic.pident(pr_df(summary_of_list$pident_max,5),summary_of_list$pident_max), 
+										magic.pident(pr_df(summary_of_list$pident,5),summary_of_list$pident))),sep="\n");cat("\n")
+				cat("\n");questions("The algorithm selected ::")
+				cat("\n");cat(c(paste(magic.pident(pr_df(summary_of_list$Ssciname[l],30),summary_of_list$pident_max[l]),"::",
+															magic.pident(pr_df(summary_of_list$pident_max[l],5),summary_of_list$pident_max[l]), 
+															magic.pident(pr_df(summary_of_list$pident[l],5),summary_of_list$pident[l]))),sep="\n")
+				cat("\n");questions("Do you agree ?")
+				slyn <- menu(c("yes","no"))
+				if (slyn==1) {#If yes agree to algorithm's suggestion on annotating to the only subject that is 100#
+					input$annotated_tax[input$qseqid==i] <- paste(summary_of_list$Ssciname[l])
+					input$pmatchsel[input$qseqid==i] <- paste(round(summary_of_list$pident_max[summary_of_list$Ssciname%in%summary_of_list$Ssciname[l]]/100,3),collapse=" | ") #Assigns the selected taxa to the input database
+					
+				}#If yes agree to algorithm's suggestion on annotating to the only subject that is 100#
+				else if (slyn==2) {#If no agree to algorithm's suggestion on annotating to the only subject that is 100#
+					cat("\n");questions("Select the taxa that the query should be annotated or enter the name manually ::");cat("\n")
+					sl <- multi.menu(c(paste(magic.pident(pr_df(summary_of_list$Ssciname,30),summary_of_list$pident_max),"::",
+																	 magic.pident(pr_df(summary_of_list$pident_max,5),summary_of_list$pident_max), 
+																	 magic.pident(pr_df(summary_of_list$pident,5),summary_of_list$pident)),
+														 "Unidentified","Enter manually"))
+					
+					if(sum(chsl[sl]=="Enter manually")>0){chsl[sl] <- readline("Enter the name of taxa ")}
+					
+					#Writing on the fasta file
+					input$annotated_tax[input$qseqid==i] <- paste(chsl[sl],collapse=" | ") #!!!
+					input$pmatchsel[input$qseqid==i] <- paste(round(summary_of_list$pident_max[summary_of_list$Ssciname%in%chsl[sl]]/100,3),collapse=" | ") #!!!
+					
+				}#If no agree to algorithm's suggestion on annotating to the only subject that is 100#
+			}#If only 1 subject is 100%
+			
+			
+			else{#If multiple subjects are 100%
+				multiple_sbj <- unlist_uneven_list(strsplit(str_trim(unlist(strsplit(summary_of_list$Ssciname[l], "[|]"))), "[ ]+"))
+				colnames(multiple_sbj) <- c("genus","species",rep("sub.sp",ncol(multiple_sbj)-2))
+				multiple_sbj <- multiple_sbj[!duplicated(paste(multiple_sbj$genus,multiple_sbj$species)),]
+				multiple_sbj <- multiple_sbj[,1:2]
+				multiple_sbj$comb_name <- rowpaste(multiple_sbj)
+				multiple_sbj$pident_max <- NA
+				
+				#      multiple_sbj <- unlist_uneven_list(strsplit(str_trim(unlist(strsplit(summary_of_list$Ssciname[l], "[|]"))), "[ ]+"))
+				#      colnames(multiple_sbj) <- c("genus","species",rep("sub.sp",ncol(multiple_sbj)-2))
+				if (prod(allduplicates(multiple_sbj$genus))==1) { #If multiple subjects are the same genus
+					
+					cat("\n");questions("A summary of subjects that your query has been blasted towards ::");cat("\n")
+					cat(c(paste(magic.pident(pr_df(summary_of_list$Ssciname,30),summary_of_list$pident_max),"::",
+											magic.pident(pr_df(summary_of_list$pident_max,5),summary_of_list$pident_max), 
+											magic.pident(pr_df(summary_of_list$pident,5),summary_of_list$pident))),sep="\n");cat("\n")
+					cat("\n");questions("The algorithm suggests to annotate to genus rank ::");cat("\n")
+					cat(c(paste(magic.pident(pr_df(paste0(unique(multiple_sbj$genus)," spp."),30),mean(summary_of_list$pident_max[l])),"::",
+											magic.pident(pr_df(mean(summary_of_list$pident_max[l]),5),mean(summary_of_list$pident_max[l])), 
+											magic.pident(pr_df(mean(summary_of_list$pident[l]),5),mean(summary_of_list$pident[l])))),sep = "\n")
+					cat("\n");questions("Do you agree ?")
+					slyn <- menu(c("yes","no"))
+					if (slyn==1) {#If yes agree to algorithm's suggestion on annotating to the genus rank
+						sl_0 <- paste0(paste(unique(multiple_sbj$genus))," spp.",collapse = " | ")
+						#         sl <- paste(sl_0," || ", paste(chsl[grep(strsplit(sl_0," ")[[1]][1],chsl)],collapse = " | "))
+						sl <- paste(sl_0," || ", paste(multiple_sbj$comb_name,collapse = " | "))
+						input$annotated_tax[input$qseqid==i] <- sl
+						
+						for (ii in length(multiple_sbj$comb_name)) {multiple_sbj$pident_max <- summary_of_list$pident_max[min(grep(multiple_sbj$comb_name[ii],summary_of_list$Ssciname))]}
+						input$pmatchsel[input$qseqid==i] <- paste(round((multiple_sbj$pident_max/100),3),collapse = " | ")
+						
+						#          input$pmatchsel[input$qseqid==i] <- paste(round((summary_of_list$pident_max[summary_of_list$Ssciname%in%chsl[grep(strsplit(sl_0," ")[[1]][1],chsl)]]/100),3),collapse = " | ")
+					}#If yes agree to algorithm's suggestion on annotating to the genus rank
+					
+					else if (slyn==2) { #If no agree to algorithm's suggestion on annotating to the genus rank
+						cat("\n");questions("Select the taxa that the query should be annotated or enter the name manually ::");cat("\n")
+						sl <- multi.menu(c(paste(magic.pident(pr_df(summary_of_list$Ssciname,30),summary_of_list$pident_max),"::",
+																		 magic.pident(pr_df(summary_of_list$pident_max,5),summary_of_list$pident_max), 
+																		 magic.pident(pr_df(summary_of_list$pident,5),summary_of_list$pident)),
+															 "Unidentified","Enter manually"))
+						if(sum(chsl[sl]=="Enter manually")>0){chsl[sl] <- readline("Enter the name of taxa \n(use | between multiple sp) ")}
+						
+						#Writing on the fasta file
+						input$annotated_tax[input$qseqid==i] <- paste(chsl[sl],collapse=" | ") 
+						input$pmatchsel[input$qseqid==i] <- paste(round(summary_of_list$pident_max[summary_of_list$Ssciname%in%chsl[sl]]/100,3),collapse=" | ") #!!!
+						
+					}#If no agree to algorithm's suggestion on annotating to the genus rank
+				} #If multiple subjects are the same genus
+				else if (prod(allduplicates(multiple_sbj$genus))==0) {#If multiple subjects are not the same genus
+					cat("\n");questions("A summary of subjects that your query has been blasted towards ::");cat("\n")
+					cat(c(paste(magic.pident(pr_df(summary_of_list$Ssciname,30),summary_of_list$pident_max),"::",
+											magic.pident(pr_df(summary_of_list$pident_max,5),summary_of_list$pident_max), 
+											magic.pident(pr_df(summary_of_list$pident,5),summary_of_list$pident))),sep="\n");cat("\n")
+					cat("\n");questions("The algorithm suggests to annotate to all subjects with 100% match ::");cat("\n")
+					sl <- paste(unique(paste(multiple_sbj$genus,multiple_sbj$species)),collapse = " | ")
+					cat(sl);cat("\n")
+					cat("\n");questions("Do you agree ?")
+					slyn <- menu(c("yes","no"))#If yes agree to algorithm's suggestion on annotating all subjects that are 100
+					if (slyn==1) {
+						input$annotated_tax[input$qseqid==i] <- sl
+						input$pmatchsel[input$qseqid==i] <- paste(round((summary_of_list$pident_max[summary_of_list$Ssciname%in%str_trim(unlist(strsplit(sl, "[|]")))]/100),3),collapse = " | ")
+					}#If yes agree to algorithm's suggestion on annotating all subjects that are 100
+					
+					else if (slyn==2) {#If no agree to algorithm's suggestion on annotating all subjects that are 100
+						cat("\n");questions("Select the taxa that the query should be annotated or enter the name manually ::");cat("\n")
+						sl <- multi.menu(c(paste(magic.pident(pr_df(summary_of_list$Ssciname,30),summary_of_list$pident_max),"::",
+																		 magic.pident(pr_df(summary_of_list$pident_max,5),summary_of_list$pident_max), 
+																		 magic.pident(pr_df(summary_of_list$pident,5),summary_of_list$pident)),
+															 "Unidentified","Enter manually"))
+						if(sum(chsl[sl]=="Enter manually")>0){chsl[sl] <- readline("Enter the name of taxa \n(use | between multiple sp) ")}
+						
+						#Writing on the fasta file
+						input$annotated_tax[input$qseqid==i] <- paste(chsl[sl],collapse=" | ") 
+						input$pmatchsel[input$qseqid==i] <- paste(round(summary_of_list$pident_max[summary_of_list$Ssciname%in%chsl[sl]]/100,3),collapse=" | ") #!!!
+					}#If no agree to algorithm's suggestion on annotating all subjects that are 100
+				}#If multiple subjects are not the same genus
+			}#If multiple subjects are 100%
+			
+			#Esthetics
+			setTxtProgressBar(pb,j);cat("\n") #progress bar
+			j <- j+1 #loop mechanism
+			# write.csv(input,"manually_annotated_function_outcome.csv",row.names = F)
+			# } #Not skipping method 2
+		} #Loop of method 2
+	} #Method 2
+	
+	else if (method==3) { #Method 3
+		j=1 #build the loop
+		while (j <= length(unique(input$qseqid))){ #Loop of method 3
+			pb <- txtProgressBar(1,length(unique(input$qseqid)),style = 3) #progress bar
+			i <- unique(input$qseqid)[j] #select the unique query ID
+			list_of_query <- input[input$qseqid==i,] #Create a dataframe with all subjects the query blasted towards
+			
+			#Esthetics of the list
+			# if (sum(skip==T&!is.na(list_of_query$annotated_tax))>0) {setTxtProgressBar(pb,j);cat("\n");j <- j+1} #Skipping in method 2
+			# else { #Not skipping method 3
+			list_of_query_print <- tibble::tibble(list_of_query);
+			list_of_query_print$pident <- magic.pident(list_of_query$pident,list_of_query$pident);
+			list_of_query_print$mismatch <- magic.pident(list_of_query$mismatch,list_of_query$pident)
+			list_of_query_print$mismatch <- function_col(list_of_query_print$mismatch) 
+			list_of_query_print$pident <- function_col(list_of_query_print$pident)
+			
+			#Print
+			cat("\n");questions(paste0("The query \"",i, "\" blast resutls ::"));cat("\n")
+			print(list_of_query_print[,c(1:2,5,7:13)]);cat("\n")
+			
+			#Create a summary list
+			summary_of_list <- list_of_query%>% group_by(Ssciname) %>% summarize(pident_max=max(pident), pident=mean(pident)) #Summary of the dataframe
+			summary_of_list <- summary_of_list[order(summary_of_list$pident_max,decreasing = T),] #Order the summary based on the %match
+			
+			chsl <- summary_of_list$Ssciname
+			
+			match_id <- 100
+			l <- summary_of_list$pident_max==match_id
+			if (sum(l)==0) {
+				l <- summary_of_list$pident_max==max(summary_of_list$pident_max)
+				match_id <- max(summary_of_list$pident_max)
+			}
+			if (sum(l)==1) {#If only 1 subject is 100%
+				cat("\n");questions("A summary of subjects that your query has been blasted towards ::");cat("\n")
+				cat(c(paste(magic.pident(pr_df(summary_of_list$Ssciname,30),summary_of_list$pident_max),"::",
+										magic.pident(pr_df(summary_of_list$pident_max,5),summary_of_list$pident_max), 
+										magic.pident(pr_df(summary_of_list$pident,5),summary_of_list$pident))),sep="\n");cat("\n")
+				cat("\n");questions("The algorithm selected ::")
+				cat("\n");cat(c(paste(magic.pident(pr_df(summary_of_list$Ssciname[l],30),summary_of_list$pident_max[l]),"::",
+															magic.pident(pr_df(summary_of_list$pident_max[l],5),summary_of_list$pident_max[l]), 
+															magic.pident(pr_df(summary_of_list$pident[l],5),summary_of_list$pident[l]))),sep="\n")
+				
+				input$annotated_tax[input$qseqid==i] <- paste(summary_of_list$Ssciname[l])
+				input$pmatchsel[input$qseqid==i] <- paste(round(summary_of_list$pident_max[summary_of_list$Ssciname%in%summary_of_list$Ssciname[l]]/100,3),collapse=" | ") #Assigns the selected taxa to the input database
+				
+			}#If only 1 subject is 100%
+			
+			else{#If multiple subjects are 100%
+				multiple_sbj <- unlist_uneven_list(strsplit(str_trim(unlist(strsplit(summary_of_list$Ssciname[l], "[|]"))), "[ ]+"))
+				colnames(multiple_sbj) <- c("genus","species",rep("sub.sp",ncol(multiple_sbj)-2))
+				multiple_sbj <- multiple_sbj[!duplicated(paste(multiple_sbj$genus,multiple_sbj$species)),]
+				multiple_sbj <- multiple_sbj[,1:2]
+				multiple_sbj$comb_name <- rowpaste(multiple_sbj)
+				multiple_sbj$pident_max <- NA
+				if (prod(allduplicates(multiple_sbj$genus))==1) { #If multiple subjects are the same genus
+					chsl <- multiple_sbj$comb_name
+					cat("\n");questions("A summary of subjects that your query has been blasted towards ::");cat("\n")
+					cat(c(paste(magic.pident(pr_df(summary_of_list$Ssciname,30),summary_of_list$pident_max),"::",
+											magic.pident(pr_df(summary_of_list$pident_max,5),summary_of_list$pident_max), 
+											magic.pident(pr_df(summary_of_list$pident,5),summary_of_list$pident))),sep="\n");cat("\n")
+					cat("\n");questions("The algorithm suggests to annotate to genus rank ::");cat("\n")
+					cat(c(paste(magic.pident(pr_df(paste0(unique(multiple_sbj$genus)," spp."),30),mean(summary_of_list$pident_max[l])),"::",
+											magic.pident(pr_df(mean(summary_of_list$pident_max[l]),5),mean(summary_of_list$pident_max[l])), 
+											magic.pident(pr_df(mean(summary_of_list$pident[l]),5),mean(summary_of_list$pident[l])))),sep = "\n")
+					
+					sl_0 <- paste0(paste(unique(multiple_sbj$genus))," spp.",collapse = " | ")
+					sl <- paste(sl_0," || ", paste(multiple_sbj$comb_name,collapse = " | "))
+					input$annotated_tax[input$qseqid==i] <- sl
+					
+					for (ii in length(multiple_sbj$comb_name)) {multiple_sbj$pident_max <- summary_of_list$pident_max[min(grep(multiple_sbj$comb_name[ii],summary_of_list$Ssciname))]}
+					input$pmatchsel[input$qseqid==i] <- paste(round((multiple_sbj$pident_max/100),3),collapse = " | ")
+				} #If multiple subjects are the same genus
+				
+				else if (prod(allduplicates(multiple_sbj$genus))==0) {#If multiple subjects are not the same genus
+					cat("\n");questions("A summary of subjects that your query has been blasted towards ::");cat("\n")
+					cat(c(paste(magic.pident(pr_df(summary_of_list$Ssciname,40),summary_of_list$pident_max),"::",
+											magic.pident(pr_df(summary_of_list$pident_max,5),summary_of_list$pident_max), 
+											magic.pident(pr_df(summary_of_list$pident,5),summary_of_list$pident))),sep="\n");cat("\n")
+					cat("\n");questions("The algorithm suggests to annotate to all subjects with 100% match ::");cat("\n")
+					sl <- paste(unique(paste(multiple_sbj$genus,multiple_sbj$species)),collapse = " | ")
+					input$annotated_tax[input$qseqid==i] <- sl
+					input$pmatchsel[input$qseqid==i] <- paste(round((summary_of_list$pident_max[summary_of_list$Ssciname%in%str_trim(unlist(strsplit(sl, "[|]")))]/100),3),collapse = " | ")
+				}#If multiple subjects are not the same genus
+			}#If multiple subjects are 100%
+			
+			#Esthetics
+			setTxtProgressBar(pb,j);cat("\n") #progress bar
+			j <- j+1 #loop mechanism
+			# write.csv(input,"manually_annotated_function_outcome.csv",row.names = F)
+			# } #Not skipping method 3
+		} #Loop of method 3
+	} #Method 3
+	
+	ret_df <- setNames(data.frame(matrix(NA,length(unique(input$qseqid)),3)),c("qseqid","ssciname","pident"))
+	ret_df$qseqid <- c(unique(input$qseqid))
+	for (ii in unique(input$qseqid)) {
+		ret_df[ret_df$qseqid==ii,2] <- unique(input$annotated_tax[input$qseqid==ii])  
+		ret_df[ret_df$qseqid==ii,3] <- unique(input$pmatchsel[input$qseqid==ii])  
+	}
+	write.csv(input,"3_manually_annotated_function_outcome.csv",row.names = F)
+	return(ret_df)
+}#function
